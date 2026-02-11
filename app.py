@@ -1,7 +1,7 @@
 import streamlit as st
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import pandas as pd
 import altair as alt
 
@@ -15,7 +15,7 @@ TEMPLATES = {
     "Posterior B": ["Lat Pulldown", "Seated Row", "T-Bar Row", "Incline Bi Curl", "Hammer Curl", "Reverse Curls", "Back Delts", "RDL", "Leg Curls"]
 }
 
-# --- DATA MANAGEMENT ---
+# --- DATA FUNCTIONS ---
 def load_history():
     if os.path.exists(HISTORY_FILE):
         try:
@@ -32,19 +32,102 @@ def save_history(history):
 if 'history' not in st.session_state:
     st.session_state.history = load_history()
 
-# --- UI LAYOUT ---
+# --- CALENDAR VISUALIZATION FUNCTION ---
+def plot_calendar():
+    # 1. Prepare Data
+    # Get range for current month view
+    today = datetime.now()
+    # Find start of this month
+    start_of_month = today.replace(day=1)
+    # Find end of this month (start of next month - 1 day)
+    next_month = (start_of_month.replace(day=28) + timedelta(days=4)).replace(day=1)
+    end_of_month = next_month - timedelta(days=1)
+    
+    # Generate all dates for the month
+    date_range = pd.date_range(start=start_of_month, end=end_of_month)
+    
+    data = []
+    for d in date_range:
+        d_str = d.strftime("%Y-%m-%d")
+        day_log = st.session_state.history.get(d_str)
+        
+        status = "Missed"
+        short_label = ""
+        
+        if day_log:
+            if day_log["type"] == "Rest":
+                status = "Rest"
+                short_label = "💤"
+            else:
+                status = "Workout"
+                # Get initials (e.g., Anterior A -> Ant A)
+                short_label = day_log["type"].replace("Anterior", "Ant").replace("Posterior", "Post")
+
+        data.append({
+            "date": d,
+            "day_num": d.day,
+            "week": d.strftime("%U"), # Week number
+            "weekday": d.strftime("%a"), # Mon, Tue...
+            "status": status,
+            "label": short_label
+        })
+        
+    df = pd.DataFrame(data)
+
+    # 2. Build Chart
+    # Base chart
+    base = alt.Chart(df).encode(
+        x=alt.X("weekday:O", sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], title=None),
+        y=alt.Y("week:O", axis=None, sort="descending"), # Sort desc so earlier weeks are at top
+        tooltip=["date", "status", "label"]
+    )
+
+    # Rectangles (The boxes)
+    rects = base.mark_rect(stroke="white", strokeWidth=2).encode(
+        color=alt.Color("status", 
+                        scale=alt.Scale(domain=["Workout", "Rest", "Missed"], 
+                                        range=["#2ecc71", "#3498db", "#ecf0f1"]),
+                        legend=None)
+    )
+
+    # Text (Day Numbers)
+    text = base.mark_text(dy=-10, size=10, color="black").encode(
+        text="day_num"
+    )
+    
+    # Text (Workout Labels)
+    labels = base.mark_text(dy=5, size=9, color="black").encode(
+        text="label"
+    )
+
+    # Combine
+    chart = (rects + text + labels).properties(
+        width="container",
+        height=300,
+        title=f"{today.strftime('%B %Y')} Schedule"
+    ).configure_view(strokeWidth=0)
+
+    st.altair_chart(chart, use_container_width=True)
+
+
+# --- MAIN APP LAYOUT ---
 st.set_page_config(page_title="Gym Tracker", page_icon="🏋️", layout="centered")
 
 st.title("🏋️ My Gym Tracker")
 
+# 1. SHOW THE VISUAL CALENDAR
+plot_calendar()
+
+st.divider()
+
+# 2. DATA ENTRY SECTION
 col1, col2 = st.columns([2, 1])
 with col1:
-    selected_date = st.date_input("Select Date", datetime.now())
+    st.write("### 📅 Edit Log")
+    selected_date = st.date_input("Select Date to Edit", datetime.now(), label_visibility="collapsed")
     date_str = selected_date.strftime("%Y-%m-%d")
 
 log = st.session_state.history.get(date_str, None)
-
-st.divider()
 
 if log is None:
     st.info(f"No log for {date_str}")
@@ -56,12 +139,14 @@ if log is None:
             st.rerun()
             
     st.write("Or select a workout:")
-    for split_name in TEMPLATES.keys():
-        if st.button(f"💪 {split_name}", use_container_width=True):
-            exercises = [{"name": n, "sets": 3, "reps": 10, "weight": 10.0} for n in TEMPLATES[split_name]]
-            st.session_state.history[date_str] = {"type": split_name, "exercises": exercises}
-            save_history(st.session_state.history)
-            st.rerun()
+    cols = st.columns(2)
+    for i, split_name in enumerate(TEMPLATES.keys()):
+        with cols[i % 2]:
+            if st.button(f"💪 {split_name}", use_container_width=True):
+                exercises = [{"name": n, "sets": 3, "reps": 10, "weight": 10.0} for n in TEMPLATES[split_name]]
+                st.session_state.history[date_str] = {"type": split_name, "exercises": exercises}
+                save_history(st.session_state.history)
+                st.rerun()
 
 elif log["type"] == "Rest":
     st.success("💤 This is a REST DAY.")
@@ -71,10 +156,12 @@ elif log["type"] == "Rest":
         st.rerun()
 
 else:
-    st.subheader(f"{log['type']}")
-    df = pd.DataFrame(log['exercises'])
+    st.success(f"✅ {log['type']} Logged")
+    
+    # Table Editor
+    df_ex = pd.DataFrame(log['exercises'])
     edited_df = st.data_editor(
-        df,
+        df_ex,
         column_config={
             "name": "Exercise",
             "sets": st.column_config.NumberColumn("Sets", min_value=1, max_value=10, step=1),
@@ -95,36 +182,3 @@ else:
         del st.session_state.history[date_str]
         save_history(st.session_state.history)
         st.rerun()
-
-st.divider()
-st.subheader("📊 Consistency Stats")
-
-if st.session_state.history:
-    dates = sorted(st.session_state.history.keys())
-    start_date = datetime.strptime(dates[0], "%Y-%m-%d")
-    end_date = datetime.strptime(dates[-1], "%Y-%m-%d")
-    total_days = (end_date - start_date).days + 1
-    counts = {"Workouts": 0, "Rest": 0, "Missed": 0}
-    
-    current = start_date
-    while current <= end_date:
-        d_s = current.strftime("%Y-%m-%d")
-        l = st.session_state.history.get(d_s)
-        if l:
-            if l["type"] == "Rest": counts["Rest"] += 1
-            else: counts["Workouts"] += 1
-        else:
-            counts["Missed"] += 1
-        current += timedelta(days=1)
-        
-    source = pd.DataFrame({'Category': list(counts.keys()), 'Value': list(counts.values())})
-    c = alt.Chart(source).mark_arc(innerRadius=50).encode(
-        theta=alt.Theta("Value", stack=True),
-        color=alt.Color("Category", scale=alt.Scale(domain=['Workouts', 'Rest', 'Missed'], range=['#2ecc71', '#3498db', '#95a5a6'])),
-        tooltip=["Category", "Value"]
-    )
-    st.altair_chart(c, use_container_width=True)
-    st.write(f"**Total Days Tracked:** {total_days}")
-    st.write(f"Workouts: {counts['Workouts']} | Rest: {counts['Rest']} | Missed: {counts['Missed']}")
-else:
-    st.write("Log your first workout to see stats!")
