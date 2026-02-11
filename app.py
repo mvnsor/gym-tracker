@@ -16,7 +16,7 @@ TEMPLATES = {
     "Posterior B": ["Lat Pulldown", "Seated Row", "T-Bar Row", "Incline Bi Curl", "Hammer Curl", "Reverse Curls", "Back Delts", "RDL", "Leg Curls"]
 }
 
-# --- AUTHENTICATION FUNCTIONS ---
+# --- AUTHENTICATION & DATA ---
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -41,15 +41,13 @@ def authenticate(username, password):
 
 def register_user(username, password):
     users = load_users()
-    if username in users:
-        return False # User exists
+    if username in users: return False
     users[username] = hash_password(password)
     save_users(users)
     return True
 
-# --- DATA FUNCTIONS (PER USER) ---
+# --- HISTORY MANAGEMENT ---
 def get_user_history_file(username):
-    # Creates a unique filename for each user: "history_ahmed.json"
     return f"history_{username}.json"
 
 def load_history(username):
@@ -67,7 +65,22 @@ def save_history(username, history):
     with open(filename, "w") as f:
         json.dump(history, f, indent=4)
 
-# --- VISUALIZATION FUNCTIONS ---
+# --- LEADERBOARD LOGIC ---
+def get_leaderboard_data():
+    """Scans all history files to count workout days for each user."""
+    users = load_users()
+    leaderboard = []
+    
+    for user in users.keys():
+        hist = load_history(user)
+        # Count only 'Workout' days (ignore Rest/Missed)
+        workout_count = sum(1 for log in hist.values() if log.get("type") != "Rest")
+        leaderboard.append({"User": user, "Workouts": workout_count})
+        
+    # Sort by Workouts (Highest first)
+    return sorted(leaderboard, key=lambda x: x["Workouts"], reverse=True)
+
+# --- VISUALIZATION ---
 def plot_calendar(history):
     today = datetime.now()
     start_of_month = today.replace(day=1)
@@ -85,75 +98,51 @@ def plot_calendar(history):
         
         if day_log:
             if day_log["type"] == "Rest":
-                status = "Rest"
-                label = "💤"
+                status = "Rest"; label = "💤"
             else:
-                status = "Workout"
-                label = day_log["type"].replace("Anterior", "Ant").replace("Posterior", "Post")
+                status = "Workout"; label = day_log["type"].replace("Anterior", "Ant").replace("Posterior", "Post")
 
         data.append({"date": d, "day": d.day, "week": d.strftime("%U"), "weekday": d.strftime("%a"), "status": status, "label": label})
         
-    df = pd.DataFrame(data)
-    
-    base = alt.Chart(df).encode(
+    base = alt.Chart(pd.DataFrame(data)).encode(
         x=alt.X("weekday:O", sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], title=None),
         y=alt.Y("week:O", axis=None, sort="descending")
     )
     rects = base.mark_rect(stroke="white").encode(
-        color=alt.Color("status", scale=alt.Scale(domain=["Workout", "Rest", "Missed"], range=["#2ecc71", "#3498db", "#ecf0f1"]), legend=None),
-        tooltip=["date", "status", "label"]
+        color=alt.Color("status", scale=alt.Scale(domain=["Workout", "Rest", "Missed"], range=["#2ecc71", "#3498db", "#ecf0f1"]), legend=None)
     )
     text = base.mark_text(dy=-10, size=10).encode(text="day")
     labels = base.mark_text(dy=5, size=9).encode(text="label")
-    
     st.altair_chart((rects + text + labels).properties(height=300, title=f"{today.strftime('%B')} Schedule"), use_container_width=True)
 
-def plot_consistency(history):
-    if not history:
-        st.info("Log your first workout to see consistency stats!")
-        return
 
-    dates = sorted(history.keys())
-    start_date = datetime.strptime(dates[0], "%Y-%m-%d")
-    end_date = datetime.strptime(dates[-1], "%Y-%m-%d")
-    total_days = (end_date - start_date).days + 1
-    
-    counts = {"Workouts": 0, "Rest": 0, "Missed": 0}
-    current = start_date
-    while current <= end_date:
-        d_s = current.strftime("%Y-%m-%d")
-        l = history.get(d_s)
-        if l:
-            if l["type"] == "Rest": counts["Rest"] += 1
-            else: counts["Workouts"] += 1
-        else:
-            counts["Missed"] += 1
-        current += timedelta(days=1)
-        
-    source = pd.DataFrame({'Category': list(counts.keys()), 'Value': list(counts.values())})
-    
-    chart = alt.Chart(source).mark_arc(innerRadius=60).encode(
-        theta=alt.Theta("Value", stack=True),
-        color=alt.Color("Category", scale=alt.Scale(domain=['Workouts', 'Rest', 'Missed'], range=['#2ecc71', '#3498db', '#95a5a6'])),
-        tooltip=["Category", "Value"]
-    )
-    
-    st.altair_chart(chart, use_container_width=True)
-    st.caption(f"Tracking {total_days} days total (from {dates[0]} to {dates[-1]})")
-
-
-# --- MAIN APP LOGIC ---
+# --- MAIN APP ---
 st.set_page_config(page_title="Gym Tracker", page_icon="🏋️", layout="centered")
 
-# Initialize Session State
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
 
-# --- LOGIN PAGE ---
+# --- LOGIN / LEADERBOARD PAGE ---
 if not st.session_state.logged_in:
     st.title("🔒 Gym Tracker Login")
     
+    # LEADERBOARD SECTION
+    st.subheader("🏆 Consistency Leaderboard")
+    leader_data = get_leaderboard_data()
+    
+    if leader_data:
+        # Display top 5 as a nice dataframe
+        df_leader = pd.DataFrame(leader_data).head(5)
+        # Add a rank column (1, 2, 3...)
+        df_leader.index = df_leader.index + 1
+        st.dataframe(df_leader, use_container_width=True)
+    else:
+        st.info("No users yet. Be the first!")
+
+    st.divider()
+
+    # LOGIN TABS
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
     
     with tab1:
@@ -163,52 +152,43 @@ if not st.session_state.logged_in:
             if authenticate(login_user, login_pass):
                 st.session_state.logged_in = True
                 st.session_state.username = login_user
-                st.toast(f"Welcome back, {login_user}!")
+                st.toast(f"Welcome, {login_user}!")
                 st.rerun()
             else:
-                st.error("Incorrect username or password")
+                st.error("Invalid credentials")
 
     with tab2:
         new_user = st.text_input("New Username", key="new_user")
         new_pass = st.text_input("New Password", type="password", key="new_pass")
         if st.button("Create Account"):
             if register_user(new_user, new_pass):
-                st.success("Account created! Please login.")
+                st.success("Account created! Login now.")
             else:
-                st.error("Username already exists.")
+                st.error("Username taken.")
 
-# --- APP DASHBOARD (AFTER LOGIN) ---
+# --- DASHBOARD (LOGGED IN) ---
 else:
-    # Load SPECIFIC user data
     user = st.session_state.username
     history = load_history(user)
     
-    # Header & Logout
-    col_head1, col_head2 = st.columns([3, 1])
-    with col_head1:
-        st.title(f"🏋️ {user}'s Tracker")
-    with col_head2:
+    col1, col2 = st.columns([3, 1])
+    with col1: st.title(f"🏋️ {user}'s Tracker")
+    with col2: 
         if st.button("Logout"):
-            st.session_state.logged_in = False
-            st.session_state.username = ""
-            st.rerun()
+            st.session_state.logged_in = False; st.rerun()
 
-    # 1. VISUAL CALENDAR
     plot_calendar(history)
     st.divider()
 
-    # 2. DATA ENTRY
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.write("### 📅 Log/Edit Workout")
+        st.write("### 📅 Log Workout")
         selected_date = st.date_input("Select Date", datetime.now(), label_visibility="collapsed")
         date_str = selected_date.strftime("%Y-%m-%d")
 
     log = history.get(date_str, None)
 
-    # Logic for Logging/Editing (Same as before but passes 'user' and 'history')
     if log is None:
-        st.info(f"No log for {date_str}")
         c1, c2 = st.columns(2)
         if c1.button("💤 Mark Rest"):
             history[date_str] = {"type": "Rest", "exercises": []}
@@ -226,37 +206,25 @@ else:
                     st.rerun()
 
     elif log["type"] == "Rest":
-        st.success("Rest Day Logged.")
-        if st.button("Delete Log", type="primary"):
-            del history[date_str]
-            save_history(user, history)
-            st.rerun()
+        st.success("Rest Day.")
+        if st.button("Delete"): del history[date_str]; save_history(user, history); st.rerun()
 
     else:
-        st.success(f"✅ {log['type']} Logged")
+        st.success(f"✅ {log['type']}")
         df_ex = pd.DataFrame(log['exercises'])
         edited_df = st.data_editor(
             df_ex,
             column_config={
                 "name": "Exercise",
-                "sets": st.column_config.NumberColumn("Sets", min_value=1, max_value=10, step=1),
-                "reps": st.column_config.NumberColumn("Reps", min_value=1, max_value=100, step=1),
+                "sets": st.column_config.NumberColumn("Sets", min_value=1, max_value=10),
+                "reps": st.column_config.NumberColumn("Reps", min_value=1, max_value=100),
                 "weight": st.column_config.NumberColumn("Kg", min_value=0.0, max_value=500.0, step=2.5)
             },
-            hide_index=True,
-            use_container_width=True
+            hide_index=True, use_container_width=True
         )
-        if st.button("💾 Save Changes", type="primary"):
+        if st.button("💾 Save"):
             history[date_str]["exercises"] = edited_df.to_dict('records')
             save_history(user, history)
             st.toast("Saved!")
         
-        if st.button("Delete Log"):
-            del history[date_str]
-            save_history(user, history)
-            st.rerun()
-
-    # 3. CONSISTENCY GRAPH (RESTORED)
-    st.divider()
-    st.subheader("📊 Consistency Stats")
-    plot_consistency(history)
+        if st.button("Delete"): del history[date_str]; save_history(user, history); st.rerun()
